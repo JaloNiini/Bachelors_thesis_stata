@@ -1,0 +1,672 @@
+*whole dataset
+clear all
+
+*change datasets into stata format
+import delimited "C:\Users\OMISTAJA\Desktop\Kandi\THE_MATCH_DATA.csv", clear
+save "THE_MATCH_DATA.dta", replace
+
+import delimited "C:\Users\OMISTAJA\Desktop\Kandi\MATCH_ODDS_READY.csv", clear
+save "MATCH_ODDS_READY.dta", replace
+
+*merge datasets
+cd "C:\Users\OMISTAJA\Desktop\Kandi"
+use "C:\Users\OMISTAJA\Desktop\Kandi\THE_MATCH_DATA.dta", clear
+merge m:m date hometeam awayteam using MATCH_ODDS_READY
+
+*formulate date variable
+gen date_numeric = date(date, "DMY")
+format date_numeric %td
+drop date
+rename date_numeric date
+
+*force a merge of two observations into one that had failed mysteriously
+sort date hometeam awayteam
+
+list if matchid == 139680
+
+local to_replaced matchurl weekday homewinodds drawodds awaywinodds homewinprobability drawprobability awaywinprobability weekdaydummy
+foreach var in `to_replaced' {
+        replace `var' = `var'[_n+1] if matchid == 139680
+}
+
+gen merge_helper = .
+replace merge_helper = 1 if _merge == 3
+replace merge_helper = 1 if matchid == 139680
+
+
+*clean data
+drop if merge_helper != 1
+
+gen season = year(date)
+drop if season == 2020
+drop if season == 2021
+
+duplicates list matchid
+
+list if missing(attendance)
+drop if missing(attendance)
+
+
+*set as panel data
+encode hometeam, gen(hometeam_id)
+encode matchday, gen(matchday_id)
+encode awayteam, gen(awayteam_id)
+egen hometeam_season_fe = group(hometeam_id season)
+egen awayteam_season_fe = group(awayteam_id season)
+xtset hometeam_season_fe matchday_id
+xtdescribe
+summarize
+
+
+*change values into numeric
+foreach var in homewinprobability drawprobability awaywinprobability distancekm awayteamlastseasonawayaverage precipitation temperature {
+    replace `var' = subinstr(`var', ",", ".", .)
+	}
+
+destring homewinprobability, replace force
+destring drawprobability, replace force
+destring awaywinprobability, replace force
+destring distancekm, replace force
+destring awayteamlastseasonawayaverage, replace force
+destring precipitation, replace force
+destring temperature, replace force
+
+drop awayteammunicipality venuemunicipality matchvenuecoordinates hometeamcoordinates awayteamcoordinates matchurl _merge awayteamlastseasonawayaverage merge_helper
+
+
+*create additional variables
+gen ln_attendance = ln(attendance)
+
+gen squared_homewinprobability = homewinprobability^2
+gen P_total = homewinprobability + drawprobability + awaywinprobability
+gen Theil = (homewinprobability / P_total) * log(P_total / homewinprobability) + (drawprobability / P_total) * log(P_total / drawprobability) + (awaywinprobability / P_total) * log(P_total / awaywinprobability)
+	
+gen expected_points = 3 * homewinprobability + 1 * drawprobability
+gen squared_expected_points = expected_points^2
+gen ln_theil = ln(Theil)
+
+gen Rain = .
+replace Rain = 1 if precipitation > 0
+replace Rain = 0 if Rain == .
+
+gen derby = .
+replace derby = 1 if distancekm == 0
+replace derby = 0 if derby == .
+
+xtset hometeam_season_fe matchdayanother
+sort hometeam_season_fe matchdayanother
+gen first_match_season = 0
+bysort hometeam_season_fe (matchdayanother): replace first_match_season = 1 if _n == 1
+list hometeam season date first_match_season if first_match_season == 1
+
+replace distance = distance / 100
+
+gen home_points = hometeamcumulativepoints - hometeammatchdaypoints
+gen home_played = hometeamplayed - 1
+gen away_points = awayteamcumulativepoints - awayteammatchdaypoints
+gen away_played = awayteamplayed - 1
+
+gen home_ppg = home_points / home_played
+gen away_ppg = away_points / away_played
+
+replace home_ppg = 0 if home_ppg == .
+replace away_ppg = 0 if away_ppg == .
+
+gen weighted_uncertainty = abs(home_ppg - away_ppg) * ln(home_played + 1)
+
+xtset hometeam_season_fe matchday_id
+xtdescribe
+summarize
+
+*labeling variables nicely
+label variable indoor_dummy "Indoors"
+label variable veikkausliigadummy "Veikkausliiga"
+label variable broadcastdummy "Broadcasted"
+label variable championshipdummy "Championship"
+label variable challengerdummy "Challenger"
+label variable weekdaydummy "Weekday"
+label variable thirdlocationdummy "Third Location"
+label variable expected_points "Expected Points"
+label variable ln_theil "Theil"
+label variable homewinprobability "Home Win Probability"
+label variable squared_homewinprobability "Home Win Probability Squared"
+label variable distancekm "Distance (100 km)"
+label variable insignificance "Insignificant"
+label variable derby "Derby Game"
+label variable first_match_season "First Home Match of Season"
+label variable ln_attendance "Attendance"
+label variable weighted_uncertainty "Weighted Uncertainty"
+label variable squared_expected_points "Expected Points Squared"
+label variable first_match_season "First Home Match"
+
+save "final_dataset_good_15.dta", replace
+
+
+*run tests to understand data and print out correlation matrices
+
+*correlation matrix of variables to be omitted (derby and insignificance)
+ssc install asdoc
+use final_dataset_good_15.dta, clear
+asdoc pwcorr ln_attendance distance derby insignificance championshipdummy challengerdummy, sig star(all) label replace
+
+*correlation matrix of outcome uncertainty proxys
+use final_dataset_good_15.dta, clear
+asdoc pwcorr ln_attendance expected_points squared_expected_points ln_theil weighted_uncertainty homewinprobability squared_homewinprobability matchdayofseason, sig star(all) label replace
+
+
+*correlation matrices of different models
+
+use final_dataset_good_15.dta, clear
+asdoc pwcorr ln_attendance expected_points squared_expected_points distance ///
+Rain temperature veikkausliigadummy indoor_dummy ///
+thirdlocationdummy broadcastdummy championshipdummy ///
+challengerdummy weekdaydummy first_match_season, sig star(all) label replace
+
+use final_dataset_good_15.dta, clear
+asdoc pwcorr ln_attendance ln_theil distance ///
+Rain temperature veikkausliigadummy indoor_dummy ///
+thirdlocationdummy broadcastdummy championshipdummy ///
+challengerdummy weekdaydummy first_match_season, sig star(all) label replace
+
+use final_dataset_good_15.dta, clear
+asdoc pwcorr ln_attendance weighted_uncertainty distance ///
+Rain temperature veikkausliigadummy indoor_dummy ///
+thirdlocationdummy broadcastdummy championshipdummy ///
+challengerdummy weekdaydummy first_match_season, sig star(all) label replace
+
+use final_dataset_good_15.dta, clear
+asdoc pwcorr ln_attendance homewinprobability squared_homewinprobability distance ///
+Rain temperature veikkausliigadummy indoor_dummy ///
+thirdlocationdummy broadcastdummy championshipdummy ///
+challengerdummy weekdaydummy first_match_season, sig star(all) label replace
+
+*test for multicollinearity
+
+local variables weighted_uncertainty ln_theil
+
+foreach var in `variables' {
+	quietly reg ln_attendance `var' distance ///
+        Rain temperature veikkausliigadummy indoor_dummy ///
+        thirdlocationdummy broadcastdummy championshipdummy ///
+		challengerdummy weekdaydummy first_match_season
+	vif
+}
+
+local variables homewinprobability expected_points
+
+foreach var in `variables' {
+	quietly reg ln_attendance `var' squared_`var' distance ///
+        Rain temperature veikkausliigadummy indoor_dummy ///
+        thirdlocationdummy broadcastdummy championshipdummy ///
+		challengerdummy weekdaydummy first_match_season
+	vif
+}
+
+	
+*test for heteroscedasticity
+
+local variables weighted_uncertainty ln_theil
+foreach var in `variables' {
+    quietly xtreg ln_attendance `var' distance ///
+        Rain temperature veikkausliigadummy indoor_dummy ///
+        thirdlocationdummy broadcastdummy championshipdummy ///
+        challengerdummy weekdaydummy first_match_season, fe
+    xttest3
+}
+
+local variables homewinprobability expected_points
+foreach var in `variables' {
+    quietly xtreg ln_attendance `var' squared_`var' distance ///
+        Rain temperature veikkausliigadummy indoor_dummy ///
+        thirdlocationdummy broadcastdummy championshipdummy ///
+        challengerdummy weekdaydummy first_match_season, fe
+    xttest3
+}
+
+*mudlak test for fixed effects
+foreach var in expected_points squared_expected_points homewinprobability squared_homewinprobability ln_theil weighted_uncertainty distance Rain temperature veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy weekdaydummy first_match_season {
+    egen mean_`var' = mean(`var'), by(hometeam_season_fe)
+}
+
+local variables weighted_uncertainty ln_theil
+foreach var in `variables' {
+    quietly xtreg ln_attendance `var' distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy first_match_season ///
+    mean_`var' mean_distance ///
+    mean_Rain mean_temperature mean_veikkausliigadummy mean_indoor_dummy mean_thirdlocationdummy mean_broadcastdummy mean_championshipdummy mean_challengerdummy ///
+    mean_weekdaydummy mean_first_match_season i.awayteam_season_fe, vce(cluster hometeam_season_fe)
+
+	estimates store mundlak
+	test mean_`var' mean_distance ///
+    mean_Rain mean_temperature mean_veikkausliigadummy mean_indoor_dummy mean_thirdlocationdummy mean_broadcastdummy mean_championshipdummy mean_challengerdummy mean_weekdaydummy mean_first_match_season
+}
+
+local variables homewinprobability expected_points
+foreach var in `variables' {
+    quietly xtreg ln_attendance `var' squared_`var' distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy first_match_season ///
+    mean_`var' mean_squared_`var' mean_distance ///
+    mean_Rain mean_temperature mean_veikkausliigadummy mean_indoor_dummy mean_thirdlocationdummy mean_broadcastdummy mean_championshipdummy mean_challengerdummy ///
+    mean_weekdaydummy mean_first_match_season i.awayteam_season_fe, vce(cluster hometeam_season_fe)
+
+	estimates store mundlak
+	test mean_`var' mean_squared_`var' mean_distance ///
+    mean_Rain mean_temperature mean_veikkausliigadummy mean_indoor_dummy mean_thirdlocationdummy mean_broadcastdummy mean_championshipdummy mean_challengerdummy mean_weekdaydummy mean_first_match_season
+}
+
+
+*results from the whole dataset
+local variables weighted_uncertainty ln_theil
+foreach var in `variables' {
+    xtreg ln_attendance `var' distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy first_match_season i.awayteam_season_fe, fe vce(cluster hometeam_season_fe)
+}
+
+
+
+*Rest of the code is for creating illustrations and conducting some additional tests*	
+
+*presenting results
+ssc install outreg2
+
+quietly xtreg ln_attendance expected_points squared_expected_points distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy first_match_season i.awayteam_season_fe, fe vce(cluster hometeam_season_fe)	
+outreg2 using Results5.doc, replace ctitle(Expected points) keep(expected_points squared_expected_points distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy first_match_season) label
+
+local variables ln_theil weighted_uncertainty
+foreach var in `variables' {
+    quietly xtreg ln_attendance `var' distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy first_match_season i.awayteam_season_fe, fe vce(cluster hometeam_season_fe)
+	outreg2 using Results5.doc, append ctitle(`var') keep(`var' distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy first_match_season) label
+}
+
+quietly xtreg ln_attendance homewinprobability squared_homewinprobability distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy first_match_season i.awayteam_season_fe, fe vce(cluster hometeam_season_fe)
+	outreg2 using Results5.doc, append ctitle("Home Win Probability") keep(homewinprobability squared_homewinprobability distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy first_match_season) label
+
+	
+*graph of median temperatures
+foreach season in 2017 2018 2019 2022 2023 2024 {
+	preserve
+    keep if season == `season'
+    collapse (median) temperature, by(matchdayofseason)
+	rename temperature med_temp_`season'
+    save temp_season_`season'.dta, replace
+    restore
+    merge m:1 matchdayofseason using temp_season_`season'.dta, nogen
+}
+
+twoway (line med_temp_2017 matchdayofseason, lcolor(red) lwidth(medium)) ///
+       (line med_temp_2018 matchdayofseason, lcolor(blue) lwidth(medium)) ///
+       (line med_temp_2019 matchdayofseason, lcolor(green) lwidth(medium)) ///
+       (line med_temp_2022 matchdayofseason, lcolor(orange) lwidth(medium)) ///
+       (line med_temp_2023 matchdayofseason, lcolor(purple) lwidth(medium)) ///
+       (line med_temp_2024 matchdayofseason, lcolor(brown) lwidth(medium)), ///
+	   xtitle("Match Day") ///
+       ytitle("Median Temperature") ///
+       title("Median Temperatures by Match Day (Multiple Seasons)") /// 
+       legend(label(1 "2017") label(2 "2018") label(3 "2019") ///
+              label(4 "2022") label(5 "2023") label(6 "2024")) xlabel(#24)
+			  
+putdocx begin
+putdocx paragraph
+putdocx text ("Figure: Median Temperature by Match Day (Multiple Seasons)")
+graph export "Median_Temps.png", as(png) replace width(1920) height(1080)
+putdocx image "Median_Temps.png", height(5) width(7)
+putdocx save "Median_Temps.docx", replace
+	
+*graph of median attendances by matchday
+foreach season in 2017 2018 2019 2022 2023 2024 {
+    preserve
+    keep if season == `season'
+    collapse (median) attendance, by(matchdayofseason)
+    rename attendance med_att_`season'
+    save temp_season_`season'.dta, replace
+    restore
+    merge m:1 matchdayofseason using temp_season_`season'.dta, nogen
+}
+
+
+twoway (line med_att_2017 matchdayofseason, lcolor(red) lwidth(medium)) ///
+       (line med_att_2018 matchdayofseason, lcolor(blue) lwidth(medium)) ///
+       (line med_att_2019 matchdayofseason, lcolor(green) lwidth(medium)) ///
+       (line med_att_2022 matchdayofseason, lcolor(orange) lwidth(medium)) ///
+       (line med_att_2023 matchdayofseason, lcolor(purple) lwidth(medium)) ///
+       (line med_att_2024 matchdayofseason, lcolor(brown) lwidth(medium)), ///
+       xtitle("Match Day") ///
+       ytitle("Median Attendance") ///
+       title("Median Attendance by Match Day (Multiple Seasons)") /// 
+       legend(label(1 "2017") label(2 "2018") label(3 "2019") ///
+              label(4 "2022") label(5 "2023") label(6 "2024")) xlabel(1(1)24)
+
+putdocx begin
+putdocx paragraph
+putdocx text ("Figure: Median Attendance by Match Day (Multiple Seasons)")
+graph export "Median_Attendance_Seasons.png", as(png) replace width(1920) height(1080)
+putdocx image "Median_Attendance_Seasons.png", height(5) width(7)
+putdocx save "Median_Attendance_Report.docx", replace
+
+	
+*understanding data through dummy variables
+local dummies Rain veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy derby first_match_season insignificance
+
+gen dummy_name = ""
+gen count_ones = .
+gen percent_ones = .
+local row = 1
+gen total_obs = _N
+scalar total_obs = total_obs[_n]
+
+foreach var in `dummies' {
+    count if `var' == 1
+    replace dummy_name = "`var'" in `row'
+    replace count_ones =  r(N) in `row'
+	replace percent_ones = (r(N) / scalar(total_obs)) * 100 in `row'
+    local row = `row' + 1
+}
+
+list dummy_name count_ones percent_ones if count_ones != .
+
+*prior table to word
+local dummies Rain veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy  championshipdummy challengerdummy ///
+    weekdaydummy derby first_match_season insignificance
+	
+local labels "Rain" "Veikkausliiga" "Indoors" "Third Location" ///
+    "Broadcasted" "Championship" "Challenger" "Weekday" ///
+    "Derby Game" "First Home Match of Season" "Insignificance"
+	
+putdocx begin
+putdocx paragraph
+putdocx text ("Table: Count and Percentage of Dummy Variables")
+putdocx paragraph
+local num_dummies: word count `dummies'
+local rows = `num_dummies' + 1
+putdocx table mytable = (`rows', 3)
+putdocx table mytable(1, 1) = ("Variable")
+putdocx table mytable(1, 2) = ("Number of games")
+putdocx table mytable(1, 3) = ("Percentage (%) of total games")
+
+local row = 2
+local i = 1
+
+foreach var in `dummies' {
+	local j = `row' - 1 
+    local labell : word `j' of `labels'
+    count if `var' == 1
+    local count_ones = r(N)
+    local percent_ones = round((r(N) / _N) * 100, 0.01)
+    putdocx table mytable(`row', 1) = (`"`labell'"')
+    putdocx table mytable(`row', 2) = (`count_ones')
+    putdocx table mytable(`row', 3) = (`percent_ones')
+    local row = `row' + 1
+}
+
+putdocx save dummy_table_improved.docx, replace
+
+******************
+
+*graph of average attendance by season
+
+clear all
+
+*change datasets into stata format
+import delimited "C:\Users\OMISTAJA\Desktop\Kandi\THE_MATCH_DATA.csv", clear
+save "THE_MATCH_DATA.dta", replace
+
+import delimited "C:\Users\OMISTAJA\Desktop\Kandi\MATCH_ODDS_READY.csv", clear
+save "MATCH_ODDS_READY.dta", replace
+
+*merge datasets
+cd "C:\Users\OMISTAJA\Desktop\Kandi"
+use "C:\Users\OMISTAJA\Desktop\Kandi\THE_MATCH_DATA.dta", clear
+merge m:m date hometeam awayteam using MATCH_ODDS_READY
+
+*formulate date variable
+gen date_numeric = date(date, "DMY")
+format date_numeric %td
+drop date
+rename date_numeric date
+
+*force a merge of two observations into one that had failed mysteriously
+sort date hometeam awayteam
+
+list if matchid == 139680
+
+local to_replaced matchurl weekday homewinodds drawodds awaywinodds homewinprobability drawprobability awaywinprobability weekdaydummy
+foreach var in `to_replaced' {
+        replace `var' = `var'[_n+1] if matchid == 139680
+}
+
+gen season = year(date)
+
+collapse (mean) avg_attendance = attendance, by(season)
+list season avg_attendance, clean
+graph twoway line avg_attendance season, ///
+    xlabel(2017(1)2024) ylabel(, angle(horizontal)) ///
+    title("Average Attendance by Season", size(medium)) ///
+    ytitle("Average Attendance") xtitle("Season")
+
+******
+*additional test on inclusion of variables
+*whole dataset
+clear all
+
+*change datasets into stata format
+import delimited "C:\Users\OMISTAJA\Desktop\Kandi\THE_MATCH_DATA.csv", clear
+save "THE_MATCH_DATA.dta", replace
+
+import delimited "C:\Users\OMISTAJA\Desktop\Kandi\MATCH_ODDS_READY.csv", clear
+save "MATCH_ODDS_READY.dta", replace
+
+*merge datasets
+cd "C:\Users\OMISTAJA\Desktop\Kandi"
+use "C:\Users\OMISTAJA\Desktop\Kandi\THE_MATCH_DATA.dta", clear
+merge m:m date hometeam awayteam using MATCH_ODDS_READY
+
+*formulate date variable
+gen date_numeric = date(date, "DMY")
+format date_numeric %td
+drop date
+rename date_numeric date
+
+*force a merge of two observations into one that had failed mysteriously
+sort date hometeam awayteam
+
+list if matchid == 139680
+
+local to_replaced matchurl weekday homewinodds drawodds awaywinodds homewinprobability drawprobability awaywinprobability weekdaydummy
+foreach var in `to_replaced' {
+        replace `var' = `var'[_n+1] if matchid == 139680
+}
+
+gen merge_helper = .
+replace merge_helper = 1 if _merge == 3
+replace merge_helper = 1 if matchid == 139680
+
+
+*clean data
+drop if merge_helper != 1
+
+gen season = year(date)
+drop if season == 2020
+drop if season == 2021
+
+duplicates list matchid
+
+list if missing(attendance)
+drop if missing(attendance)
+
+
+*set as panel data
+encode hometeam, gen(hometeam_id)
+encode matchday, gen(matchday_id)
+encode awayteam, gen(awayteam_id)
+egen hometeam_season_fe = group(hometeam_id season)
+egen awayteam_season_fe = group(awayteam_id season)
+xtset hometeam_season_fe matchday_id
+xtdescribe
+summarize
+
+
+*change values into numeric
+foreach var in homewinprobability drawprobability awaywinprobability distancekm awayteamlastseasonawayaverage precipitation temperature {
+    replace `var' = subinstr(`var', ",", ".", .)
+	}
+
+destring homewinprobability, replace force
+destring drawprobability, replace force
+destring awaywinprobability, replace force
+destring distancekm, replace force
+destring awayteamlastseasonawayaverage, replace force
+destring precipitation, replace force
+destring temperature, replace force
+
+drop awayteammunicipality venuemunicipality matchvenuecoordinates hometeamcoordinates awayteamcoordinates matchurl _merge awayteamlastseasonawayaverage merge_helper
+
+
+*create additional variables
+gen ln_attendance = ln(attendance)
+
+gen squared_homewinprobability = homewinprobability^2
+gen P_total = homewinprobability + drawprobability + awaywinprobability
+gen Theil = (homewinprobability / P_total) * log(P_total / homewinprobability) + (drawprobability / P_total) * log(P_total / drawprobability) + (awaywinprobability / P_total) * log(P_total / awaywinprobability)
+	
+gen expected_points = 3 * homewinprobability + 1 * drawprobability
+gen squared_expected_points = expected_points^2
+gen ln_theil = ln(Theil)
+
+gen Rain = .
+replace Rain = 1 if precipitation > 0
+replace Rain = 0 if Rain == .
+
+gen derby = .
+replace derby = 1 if distancekm == 0
+replace derby = 0 if derby == .
+
+xtset hometeam_season_fe matchdayanother
+sort hometeam_season_fe matchdayanother
+gen first_match_season = 0
+bysort hometeam_season_fe (matchdayanother): replace first_match_season = 1 if _n == 1
+list hometeam season date first_match_season if first_match_season == 1
+
+replace distance = distance / 100
+
+gen home_points = hometeamcumulativepoints - hometeammatchdaypoints
+gen home_played = hometeamplayed - 1
+gen away_points = awayteamcumulativepoints - awayteammatchdaypoints
+gen away_played = awayteamplayed - 1
+
+gen home_ppg = home_points / home_played
+gen away_ppg = away_points / away_played
+
+replace home_ppg = 0 if home_ppg == .
+replace away_ppg = 0 if away_ppg == .
+
+gen weighted_uncertainty = abs(home_ppg - away_ppg) * ln(home_played + 1)
+
+xtset hometeam_season_fe matchday_id
+xtdescribe
+summarize
+
+*labeling variables nicely
+label variable indoor_dummy "Indoors"
+label variable veikkausliigadummy "Veikkausliiga"
+label variable broadcastdummy "Broadcasted"
+label variable championshipdummy "Championship"
+label variable challengerdummy "Challenger"
+label variable weekdaydummy "Weekday"
+label variable thirdlocationdummy "Third Location"
+label variable expected_points "Expected Points"
+label variable ln_theil "Theil"
+label variable homewinprobability "Home Win Probability"
+label variable squared_homewinprobability "Home Win Probability Squared"
+label variable distancekm "Distance (100 km)"
+label variable insignificance "Insignificant"
+label variable derby "Derby Game"
+label variable first_match_season "First Home Match of Season"
+label variable ln_attendance "Attendance"
+label variable weighted_uncertainty "Weighted Uncertainty"
+label variable squared_expected_points "Expected Points Squared"
+label variable first_match_season "First Home Match"
+
+
+*test for autocorrelation
+xtset hometeam_season_fe matchdayanother
+sort hometeam_season_fe matchdayanother
+gen lag_attendance = ln_attendance[_n-1]
+gen lag_season = season[_n-1]
+drop if season != lag_season
+drop if lag_attendance == .
+
+gen first_difference = ln_attendance - lag_attendance
+xtreg ln_attendance first_difference, fe vce(cluster hometeam_season_fe)
+predict residuals, e
+gen lag_res = residuals[_n-1]
+reg residuals lag_res
+test lag_res = -0.5
+
+drop residuals
+quietly xtreg ln_attendance weighted_uncertainty distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy derby first_match_season insignificance i.awayteam_season_fe, fe vce(cluster hometeam_season_fe)
+predict residuals, e
+gen lag_residuals = residuals[_n-1] if hometeam_season == hometeam_season[_n-1]
+pwcorr residuals lag_residuals, sig
+
+gen lag2_residuals = residuals[_n-2] if hometeam_season == hometeam_season[_n-2]
+pwcorr residuals lag2_residuals, sig
+
+
+*test whether to include lagged attendance
+xtreg ln_attendance expected_points squared_expected_points distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy i.awayteam_season_fe, fe vce(cluster hometeam_season_fe)
+estimates store model1
+
+xtreg ln_attendance expected_points squared_expected_points distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy lag_attendance i.awayteam_season_fe, fe vce(cluster hometeam_season_fe)
+estimates store model2
+
+test lag_attendance
+
+
+*test whether to include insignificance
+xtreg ln_attendance expected_points squared_expected_points distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy derby first_match_season i.awayteam_season_fe, fe vce(cluster hometeam_season_fe)
+estimates store model1
+
+xtreg ln_attendance expected_points squared_expected_points distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy derby first_match_season insignificance i.awayteam_season_fe, fe vce(cluster hometeam_season_fe)
+estimates store model2
+
+test insignificance
+
+
+*test whether to include derby
+xtreg ln_attendance expected_points squared_expected_points distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy first_match_season i.awayteam_season_fe, fe vce(cluster hometeam_season_fe)
+estimates store model1
+
+xtreg ln_attendance expected_points squared_expected_points distance Rain temperature ///
+    veikkausliigadummy indoor_dummy thirdlocationdummy broadcastdummy championshipdummy challengerdummy ///
+    weekdaydummy derby first_match_season i.awayteam_season_fe, fe vce(cluster hometeam_season_fe)
+estimates store model2
+
+test derby
